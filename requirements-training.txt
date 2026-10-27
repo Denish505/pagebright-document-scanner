@@ -1,0 +1,5 @@
+# Optional offline supervised model-training dependencies.
+# These are not needed to run the hosted scanning app.
+torch>=2.6
+torchvision>=0.21
+onnx>=1.16
