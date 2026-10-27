@@ -1,0 +1,5 @@
+numpy>=1.24
+opencv-python-headless>=4.8,<5
+streamlit>=1.37,<2
+Pillow>=10.0
+# Optional for reference-based SSIM: scikit-image>=0.21
