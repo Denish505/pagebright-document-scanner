@@ -167,9 +167,20 @@ st.caption(
 )
 preview_col, action_col = st.columns([1.2, 1])
 with preview_col:
+    source_page_number = 1
+    source_preview = first_page
+    if is_pdf:
+        source_page_number = st.selectbox(
+            "Preview source page",
+            options=list(range(1, page_count + 1)),
+            format_func=lambda value: f"Page {value} of {page_count}",
+            key=f"pagebright_source_preview_{file_hash[:12]}",
+            help="This changes the preview only. The Enhance button still processes every page.",
+        )
+        source_preview = render_pdf_page(uploaded_bytes, source_page_number - 1, pdf_dpi)
     st.image(
-        cv2.cvtColor(first_page, cv2.COLOR_BGR2RGB),
-        caption="First PDF page" if is_pdf else "Original photo",
+        cv2.cvtColor(source_preview, cv2.COLOR_BGR2RGB),
+        caption=f"Source page {source_page_number}" if is_pdf else "Original photo",
         use_container_width=True,
     )
 with action_col:
@@ -328,6 +339,7 @@ if result and result.get("settings_hash") == settings_hash:
     selected_page = st.selectbox(
         "Preview page", list(range(1, len(reports) + 1)),
         format_func=lambda value: f"Page {value}",
+        key=f"pagebright_output_preview_{file_hash[:12]}",
     )
     prefix = f"page_{selected_page:03d}/"
     with st.expander("Correct this page and update the PDF", expanded=False):
