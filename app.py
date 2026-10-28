@@ -330,6 +330,107 @@ if result and result.get("settings_hash") == settings_hash:
         format_func=lambda value: f"Page {value}",
     )
     prefix = f"page_{selected_page:03d}/"
+    with st.expander("Correct this page and update the PDF", expanded=False):
+        st.caption(
+            "You can fix a page after the full PDF has been enhanced. Set its four page corners, "
+            "then update just this page in the combined PDF."
+        )
+        original_page = (
+            render_pdf_page(uploaded_bytes, selected_page - 1, pdf_dpi)
+            if is_pdf else first_page
+        )
+        page_h, page_w = original_page.shape[:2]
+        st.image(
+            cv2.cvtColor(original_page, cv2.COLOR_BGR2RGB),
+            caption=f"Original page {selected_page} — use these coordinates",
+            use_container_width=True,
+        )
+        repair_points = []
+        repair_labels = ("Top left", "Top right", "Bottom right", "Bottom left")
+        repair_defaults = (
+            (int(page_w * .04), int(page_h * .04)),
+            (int(page_w * .96), int(page_h * .04)),
+            (int(page_w * .96), int(page_h * .96)),
+            (int(page_w * .04), int(page_h * .96)),
+        )
+        repair_key = f"{file_hash[:12]}_{selected_page}"
+        for point_index, (label, default) in enumerate(zip(repair_labels, repair_defaults)):
+            x_col, y_col = st.columns(2)
+            with x_col:
+                repair_x = st.number_input(
+                    f"{label} X", min_value=0, max_value=max(1, page_w - 1),
+                    value=min(default[0], page_w - 1),
+                    key=f"repair_x_{repair_key}_{point_index}",
+                )
+            with y_col:
+                repair_y = st.number_input(
+                    f"{label} Y", min_value=0, max_value=max(1, page_h - 1),
+                    value=min(default[1], page_h - 1),
+                    key=f"repair_y_{repair_key}_{point_index}",
+                )
+            repair_points.append((repair_x, repair_y))
+        if st.button("Update this page in the combined PDF", key=f"repair_page_{repair_key}"):
+            try:
+                with tempfile.TemporaryDirectory(prefix="pagebright-repair-") as repair_dir:
+                    repair_root = Path(repair_dir)
+                    source_path = repair_root / "source.png"
+                    page_output_dir = repair_root / "output"
+                    if not cv2.imwrite(str(source_path), original_page):
+                        raise OSError("Could not prepare the selected page for correction.")
+                    corrected_report = process_document(
+                        source_path, page_output_dir, mode=mode,
+                        manual_corners=np.asarray(repair_points, dtype=np.float32),
+                        min_area_fraction=min_area, denoise=denoise,
+                        model_path=MODEL_PATH if MODEL_PATH.exists() else None,
+                    )
+                    corrected_report["page_number"] = selected_page
+                    for old_name in list(files):
+                        if old_name.startswith(prefix):
+                            del files[old_name]
+                    for output_name in corrected_report["outputs"]:
+                        files[prefix + output_name] = (page_output_dir / output_name).read_bytes()
+                    reports[selected_page - 1] = corrected_report
+                    pdf_images = []
+                    for page_number in range(1, len(reports) + 1):
+                        page_prefix = f"page_{page_number:03d}/"
+                        image_name = next(
+                            (page_prefix + name for name in (
+                                "enhanced_color.jpg", "enhanced_gray.jpg",
+                                "enhanced_bw.png", "rectified_color.jpg",
+                            ) if page_prefix + name in files),
+                            None,
+                        )
+                        if image_name is None:
+                            raise ValueError(f"No processed image was saved for page {page_number}.")
+                        with Image.open(io.BytesIO(files[image_name])) as page_image:
+                            pdf_images.append(page_image.convert("RGB"))
+                    pdf_buffer = io.BytesIO()
+                    pdf_images[0].save(
+                        pdf_buffer, format="PDF", save_all=True,
+                        append_images=pdf_images[1:],
+                        resolution=float(pdf_dpi if is_pdf else 150),
+                    )
+                    files["document_scan.pdf"] = pdf_buffer.getvalue()
+                    for page_image in pdf_images:
+                        page_image.close()
+                    metadata = {
+                        "source_file": Path(uploaded.name).name,
+                        "source_type": "pdf" if is_pdf else "image",
+                        "page_count": len(reports),
+                        "pdf_render_dpi": pdf_dpi if is_pdf else None,
+                        "pages": reports,
+                        "notices": result["notices"],
+                    }
+                    files["metadata.json"] = json.dumps(metadata, indent=2).encode("utf-8")
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                        for name, data in files.items():
+                            archive.writestr(name, data)
+                    result["bundle"] = zip_buffer.getvalue()
+                    st.session_state["pagebright_result"] = result
+                    st.success(f"Page {selected_page} was updated in the combined PDF and ZIP.")
+            except (OSError, ValueError, cv2.error, RuntimeError) as error:
+                st.error(f"Could not update page {selected_page}: {error}")
     tabs = st.tabs(["Boundary", "Color", "Grayscale", "Black and white", "Details"])
     for tab, filename, caption in (
         (tabs[0], "boundary_preview.jpg", "Detected page boundary"),
