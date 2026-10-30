@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
@@ -23,6 +24,12 @@ def _contours(binary: np.ndarray) -> list[np.ndarray]:
     return found[-2]
 
 
+@lru_cache(maxsize=2)
+def _load_onnx(model_path: str, modified: float) -> "cv2.dnn.Net":
+    """Load the ONNX model once; ``modified`` makes a retrained file reload."""
+    return cv2.dnn.readNetFromONNX(model_path)
+
+
 def _detect_with_onnx(image: np.ndarray, model_path: str | Path, min_area_fraction: float) -> PageDetection:
     """Use a user-trained corner regressor exported by scripts/train_page_model.py."""
     height, width = image.shape[:2]
@@ -31,7 +38,8 @@ def _detect_with_onnx(image: np.ndarray, model_path: str | Path, min_area_fracti
     mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
     std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
     tensor = ((tensor - mean) / std).transpose(2, 0, 1)[None, ...].astype(np.float32)
-    net = cv2.dnn.readNetFromONNX(str(model_path))
+    path = Path(model_path)
+    net = _load_onnx(str(path), path.stat().st_mtime)
     net.setInput(tensor)
     normalized = net.forward().reshape(4, 2)
     if not np.isfinite(normalized).all() or (normalized < -0.05).any() or (normalized > 1.05).any():
