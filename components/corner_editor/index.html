@@ -1,0 +1,168 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden;
+               font-family: "Source Sans Pro", system-ui, sans-serif; }
+  #wrap { position: relative; display: flex; justify-content: center; }
+  canvas { touch-action: none; display: block; border-radius: 10px; cursor: crosshair; }
+  #hint { text-align: center; font-size: 13px; color: #526678; padding: 6px 0 2px; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<div id="hint">Drag the four round handles onto the corners of the paper.</div>
+<script>
+(function () {
+  "use strict";
+  // --- Minimal Streamlit component protocol (no build step needed) ---
+  function send(type, data) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
+  }
+  function setValue(value) { send("streamlit:setComponentValue", { value: value, dataType: "json" }); }
+  function setHeight(h) { send("streamlit:setFrameHeight", { height: h }); }
+
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const img = new Image();
+  let corners = null;          // normalized [[x,y] x4], TL TR BR BL
+  let renderKey = null;        // resets local state when image/version changes
+  let maxHeight = 640;
+  let accent = "#147d8a";
+  let drag = -1, hover = -1;
+  let cssW = 0, cssH = 0;
+
+  function layout() {
+    if (!img.naturalWidth) return;
+    const avail = Math.max(200, document.body.clientWidth);
+    const aspect = img.naturalHeight / img.naturalWidth;
+    cssW = avail; cssH = cssW * aspect;
+    if (cssH > maxHeight) { cssH = maxHeight; cssW = cssH / aspect; }
+    const dpr = window.devicePixelRatio || 1;
+    canvas.style.width = cssW + "px"; canvas.style.height = cssH + "px";
+    canvas.width = Math.round(cssW * dpr); canvas.height = Math.round(cssH * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+    setHeight(cssH + document.getElementById("hint").offsetHeight + 4);
+  }
+
+  function px(p) { return [p[0] * cssW, p[1] * cssH]; }
+
+  function draw() {
+    if (!img.naturalWidth || !corners) return;
+    ctx.clearRect(0, 0, cssW, cssH);
+    ctx.drawImage(img, 0, 0, cssW, cssH);
+    const pts = corners.map(px);
+    // Dim everything outside the page.
+    ctx.save();
+    ctx.fillStyle = "rgba(10, 25, 40, 0.45)";
+    ctx.beginPath();
+    ctx.rect(0, 0, cssW, cssH);
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 3; i >= 1; i--) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
+    ctx.fill("evenodd");
+    ctx.restore();
+    // Outline.
+    ctx.lineWidth = 2.5; ctx.strokeStyle = accent;
+    ctx.beginPath();
+    pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+    ctx.closePath(); ctx.stroke();
+    // Handles.
+    pts.forEach((p, i) => {
+      const r = (i === drag || i === hover) ? 11 : 9;
+      ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(255,255,255,0.92)"; ctx.fill();
+      ctx.lineWidth = 3; ctx.strokeStyle = accent; ctx.stroke();
+      ctx.beginPath(); ctx.arc(p[0], p[1], 2, 0, Math.PI * 2);
+      ctx.fillStyle = accent; ctx.fill();
+    });
+    if (drag >= 0) drawLoupe(pts[drag]);
+  }
+
+  // Magnifier so corners can be placed precisely, shown away from the finger.
+  function drawLoupe(p) {
+    const R = Math.min(70, cssW / 5), zoom = 3;
+    const cx = p[0] < cssW / 2 ? cssW - R - 10 : R + 10;
+    const cy = R + 10;
+    const sx = img.naturalWidth / cssW, sy = img.naturalHeight / cssH;
+    const srcR = R / zoom;
+    ctx.save();
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.closePath();
+    ctx.fillStyle = "#fff"; ctx.fill(); ctx.clip();
+    ctx.drawImage(img, (p[0] - srcR) * sx, (p[1] - srcR) * sy, 2 * srcR * sx, 2 * srcR * sy,
+                  cx - R, cy - R, 2 * R, 2 * R);
+    ctx.strokeStyle = accent; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy);
+    ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R); ctx.stroke();
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.lineWidth = 3; ctx.strokeStyle = "#fff"; ctx.stroke();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = accent; ctx.stroke();
+  }
+
+  function eventPoint(e) {
+    const r = canvas.getBoundingClientRect();
+    return [e.clientX - r.left, e.clientY - r.top];
+  }
+  function nearest(pt, radius) {
+    let best = -1, bestD = radius * radius;
+    corners.forEach((c, i) => {
+      const p = px(c), d = (p[0] - pt[0]) ** 2 + (p[1] - pt[1]) ** 2;
+      if (d < bestD) { bestD = d; best = i; }
+    });
+    return best;
+  }
+
+  canvas.addEventListener("pointerdown", (e) => {
+    if (!corners) return;
+    const pt = eventPoint(e);
+    // Generous hit area for touch; otherwise grab the closest corner anyway.
+    drag = nearest(pt, e.pointerType === "touch" ? 44 : 28);
+    if (drag < 0) drag = nearest(pt, 1e6);
+    canvas.setPointerCapture(e.pointerId);
+    move(e);
+  });
+  function move(e) {
+    const pt = eventPoint(e);
+    if (drag < 0) {
+      const h = nearest(pt, 28);
+      if (h !== hover) { hover = h; canvas.style.cursor = h >= 0 ? "grab" : "crosshair"; draw(); }
+      return;
+    }
+    canvas.style.cursor = "grabbing";
+    corners[drag] = [Math.min(1, Math.max(0, pt[0] / cssW)), Math.min(1, Math.max(0, pt[1] / cssH))];
+    draw();
+  }
+  canvas.addEventListener("pointermove", move);
+  function end() {
+    if (drag < 0) return;
+    drag = -1; canvas.style.cursor = "grab"; draw();
+    setValue(corners.map(c => [Math.round(c[0] * 1e5) / 1e5, Math.round(c[1] * 1e5) / 1e5]));
+  }
+  canvas.addEventListener("pointerup", end);
+  canvas.addEventListener("pointercancel", end);
+
+  window.addEventListener("message", (event) => {
+    const data = event.data || {};
+    if (data.type !== "streamlit:render") return;
+    const args = data.args || {};
+    if (data.theme && data.theme.primaryColor) accent = data.theme.primaryColor;
+    maxHeight = args.max_height || 640;
+    const key = String(args.version) + "|" + args.image.length + "|" + args.image.slice(-64);
+    if (key !== renderKey) {
+      renderKey = key;
+      corners = args.corners.map(c => [c[0], c[1]]);
+      img.onload = layout;
+      img.src = args.image;
+    } else {
+      layout();
+    }
+  });
+  window.addEventListener("resize", layout);
+  send("streamlit:componentReady", { apiVersion: 1 });
+})();
+</script>
+</body>
+</html>
